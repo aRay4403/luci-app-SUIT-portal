@@ -1,0 +1,24 @@
+{
+	"luci-app-suit-portal": {
+		"description": "校园网 ePortal 自动认证 —— 读写 UCI 配置、查看状态、手动触发认证",
+		"read": {
+			"ubus": {
+				"service": [ "list" ]
+			},
+			"uci": [ "suit-portal" ],
+			"file": {
+				"/tmp/run/suit-portal.state": [ "read" ],
+				"/tmp/log/suit-portal.log": [ "read" ],
+				"/var/run/suit-portal.state": [ "read" ],
+				"/var/log/suit-portal.log": [ "read" ]
+			}
+		},
+		"write": {
+			"uci": [ "suit-portal" ],
+			"file": {
+				"/usr/bin/suit-portal.sh": [ "exec" ],
+				"/etc/init.d/suit-portal": [ "exec" ]
+			}
+		}
+	}
+}

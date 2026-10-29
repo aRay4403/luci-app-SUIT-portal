@@ -1,0 +1,54 @@
+#!/bin/sh
+# nc (netcat) 的最小模拟 shim
+#
+# 用途：本机没有 nc，但脚本依赖 nc 发裸 HTTP（读 Set-Cookie / POST 表单）。
+# 这个 shim 把原始请求转给 curl，复刻 nc 的「原始响应（含响应头）」行为。
+#
+# 调用形式：
+#   printf 'GET / HTTP/1.0\r\n...\r\n\r\n' | nc <host> <port> > out
+#   printf 'POST /x HTTP/1.0\r\nContent-Length: 5\r\n\r\nabcde' | nc <host> <port> > out
+
+HOST="$1"
+PORT="$2"
+
+[ -z "$PORT" ] && PORT=80
+
+# 读入整个请求（到 EOF），存成临时文件（body 可能含二进制/换行）
+TMPREQ="$(dirname "$0")/.ncreq.$$"
+cat >"$TMPREQ"
+
+METHOD=$(sed -n '1s/^\([A-Z]*\)[[:space:]].*/\1/p' "$TMPREQ")
+PATHQ=$(sed -n '1s/^[A-Z]*[[:space:]]*\([^[:space:]]*\).*/\1/p' "$TMPREQ")
+
+[ -z "$PATHQ" ] && rm -f "$TMPREQ" && exit 1
+
+# 收集请求头（跳过请求行），转成 curl config
+TMPCFG="$(dirname "$0")/.nccfg.$$"
+: >"$TMPCFG"
+sed -n 's/^\([A-Za-z-]*\):[[:space:]]*\(.*\)\r$/\1: \2/p' "$TMPREQ" | \
+while IFS= read -r line; do
+    # 跳过 curl 会自己管的头
+    case "$line" in
+        Host:*|Connection:*|Content-Length:*) continue ;;
+    esac
+    printf 'header = "%s"\n' "$line" >>"$TMPCFG"
+done
+
+# 分离 body（空行之后）
+TMPBODY="$(dirname "$0")/.ncbody.$$"
+awk 'BEGIN{b=0} b{print} /^\r?$/{b=1}' "$TMPREQ" >"$TMPBODY"
+
+KARG=""
+[ -s "$TMPCFG" ] && KARG="-K $TMPCFG"
+
+if [ "$METHOD" = "POST" ]; then
+    curl -s --noproxy '*' --max-time 10 --http1.0 -i -X POST $KARG \
+        --data-binary @"$TMPBODY" \
+        "http://${HOST}:${PORT}${PATHQ}" 2>/dev/null
+else
+    curl -s --noproxy '*' --max-time 10 --http1.0 -i $KARG \
+        "http://${HOST}:${PORT}${PATHQ}" 2>/dev/null
+fi
+
+rm -f "$TMPREQ" "$TMPCFG" "$TMPBODY"
+exit 0

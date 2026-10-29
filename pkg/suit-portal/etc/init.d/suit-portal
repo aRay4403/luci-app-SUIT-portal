@@ -1,0 +1,103 @@
+#!/bin/sh /etc/rc.common
+###############################################################################
+# 校园网 ePortal 自动认证 守护进程 (OpenWrt / procd)
+#
+# 配置在 /etc/config/suit-portal（UCI），LuCI 页面：服务 -> SUIT 校园网自动认证
+#
+#   /etc/init.d/suit-portal start|stop|restart|enable|disable|status
+#
+# 自适应间隔：
+#   在线            -> 每 INTERVAL 秒检查一次
+#   掉线 / 认证失败 -> 每 INTERVAL_OFFLINE 秒重试（默认 5 秒，断网后尽快恢复）
+#   连续失败超过 N 次 -> 逐步退避到 INTERVAL_OFFLINE_MAX（默认 60 秒）
+###############################################################################
+
+START=99
+STOP=10
+USE_PROCD=1
+
+PROG=/usr/bin/suit-portal.sh
+STATE=/var/run/suit-portal.state
+
+start_service() {
+	config_load suit-portal
+
+	local enabled interval ivoff ivmax fast
+	config_get_bool enabled main enabled 1
+	config_get interval main interval 30
+	config_get ivoff main interval_offline 5
+	config_get ivmax main interval_offline_max 60
+	fast=12
+
+	if [ "$enabled" -ne 1 ]; then
+		logger -t suit-portal "配置为已禁用，不启动"
+		return 0
+	fi
+
+	[ -n "$interval" ] || interval=30
+	[ -n "$ivoff" ] || ivoff=5
+	[ -n "$ivmax" ] || ivmax=60
+
+	mkdir -p "$(dirname "$STATE")" 2>/dev/null
+
+	procd_open_instance
+	procd_set_param command /bin/sh -c "
+		# 开机时 netifd 可能还没把 WAN 拉起来，没有默认路由就先等（最多 60 秒），
+		# 否则 nc 会挂在半路上。
+		i=0
+		while [ \$i -lt 60 ]; do
+			ip route show default 2>/dev/null | grep -q default && break
+			sleep 2
+			i=\$((i + 2))
+		done
+
+		iv=$interval
+		ivoff=$ivoff
+		ivmax=$ivmax
+		fast=$fast
+		fail=0
+		prev=2
+		while true; do
+			if $PROG >/dev/null 2>&1; then
+				iv=$interval; st=0; fail=0
+			else
+				fail=\$((fail + 1))
+				if [ \"\$fail\" -le \"\$fast\" ]; then
+					iv=\$ivoff
+				else
+					iv=\$((ivoff * (fail - fast + 1)))
+					[ \"\$iv\" -gt \"\$ivmax\" ] && iv=\$ivmax
+				fi
+				st=1
+			fi
+			# 只在「在线 <-> 离线」翻转时写一条 syslog，避免刷屏
+			if [ \"\$st\" != \"\$prev\" ]; then
+				if [ \"\$st\" = 0 ]; then
+					logger -t suit-portal \"校园网：已在线\"
+				else
+					logger -t suit-portal \"校园网：掉线或认证失败，先每 \$ivoff 秒重试，连续失败后逐步退避到 \$ivmax 秒\"
+				fi
+				prev=\$st
+			fi
+			echo \$iv > $STATE
+			sleep \$iv
+		done
+	"
+	procd_set_param respawn
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}
+
+stop_service() {
+	killall suit-portal.sh 2>/dev/null
+}
+
+service_triggers() {
+	procd_add_reload_trigger "suit-portal"
+}
+
+reload_service() {
+	stop
+	start
+}

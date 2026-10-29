@@ -1,0 +1,98 @@
+#!/bin/sh
+# uclient-fetch 的最小模拟 shim（仅覆盖本脚本用到的调用形式）
+#
+# 目的：在开发机上验证
+#   (1) uclient-fetch 会跟随 302 并打印 "Redirected to ... on ..."
+#   (2) cookie 能通过 --header "Cookie: ..." 正确传出
+# 它把请求转给 curl，然后模仿 uclient-fetch 的输出格式：
+#   Downloading '<url>'
+#   Connecting to <host>
+#   Set-Cookie: ...          <- 回显响应头，供脚本收集 cookie
+#   Redirected to <loc> on <host>          <- 关键：这行要能被解析
+#   HTTP error 400                         <- 跟随失败时的报错
+# 并把最终 body 写到 -O 指定的文件。
+#
+# 用法：把本目录放到 PATH 前面，脚本里设 HTTP_BACKEND=uclient-fetch 即可。
+
+OUT=""
+URL=""
+POSTFILE=""
+
+# 【重要】Windows 版 curl 不认 Git Bash 的 /e/... 路径，所以一开始就切到 shim
+# 所在目录、全程用相对文件名。必须放在参数循环**之前**，否则 --header 会写到
+# 调用者的当前目录，cd 之后就读不到了（曾经的真实 bug）。
+BASE=$(dirname "$0")
+cd "$BASE" || exit 1
+
+HDRFILE=".uhdr.$$"
+TO=15
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -O) OUT="$2"; shift 2 ;;
+        -q) shift ;;
+        --timeout=*) TO="${1#--timeout=}"; shift ;;
+        --header=*) printf '%s\n' "${1#--header=}" >>"$HDRFILE"; shift ;;
+        --post-file=*) POSTFILE="${1#--post-file=}"; shift ;;
+        --*) shift ;;
+        *) URL="$1"; shift ;;
+    esac
+done
+
+HOST=$(printf '%s' "$URL" | sed -n 's|^[a-z]*://\([^/:]*\).*|\1|p')
+
+echo "Downloading '$URL'"
+echo "Connecting to ${HOST}:80"
+
+TMPH=".hdr.$$"
+TMPB=".body.$$"
+CFG=".curlcfg.$$"
+
+# 用 curl 的 config 文件传 header，彻底避开 shell 引号/空格问题
+KARG=""
+if [ -s "$HDRFILE" ]; then
+    : >"$CFG"
+    while IFS= read -r h; do
+        [ -z "$h" ] && continue
+        printf 'header = "%s"\n' "$h" >>"$CFG"
+    done <"$HDRFILE"
+    [ -s "$CFG" ] && KARG="-K $CFG"
+fi
+
+if [ -n "$POSTFILE" ]; then
+    curl -s --noproxy '*' --max-time "$TO" -D "$TMPH" -o "$TMPB" -X POST $KARG \
+        --data-binary @"$POSTFILE" "$URL" 2>/dev/null
+else
+    curl -s --noproxy '*' --max-time "$TO" -D "$TMPH" -o "$TMPB" $KARG "$URL" 2>/dev/null
+fi
+
+CODE=$(sed -n '1s|.*[[:space:]]\([0-9]\{3\}\).*|\1|p' "$TMPH" | head -1)
+LOC=$(sed -n 's/^[Ll]ocation:[[:space:]]*\(.*\)\r*$/\1/p' "$TMPH" | head -1 | sed 's/[[:space:]]*$//')
+
+# 回显 Set-Cookie（供脚本收集 cookie）
+sed -n 's/^\([Ss]et-[Cc]ookie:.*\)$/\1/p' "$TMPH" 2>/dev/null
+
+if [ -n "$LOC" ]; then
+    echo "Redirected to ${LOC} on ${HOST}"
+    # 它随后会跟随；若目标含未编码空格 -> 400（复刻实机现象）
+    case "$LOC" in
+        *" "*)
+            echo "HTTP error 400"
+            rm -f "$TMPH" "$TMPB" "$HDRFILE" "$CFG"
+            exit 1
+            ;;
+    esac
+fi
+
+if [ -n "$OUT" ] && [ "$OUT" != "-" ]; then
+    cp "$TMPB" "$OUT" 2>/dev/null
+    echo "Download completed ($(wc -c <"$TMPB" 2>/dev/null) bytes)"
+else
+    cat "$TMPB" 2>/dev/null
+fi
+
+rm -f "$TMPH" "$TMPB" "$HDRFILE" "$CFG"
+
+if [ -n "$LOC" ]; then exit 0; fi
+[ "$CODE" = "200" ] && exit 0
+exit 0

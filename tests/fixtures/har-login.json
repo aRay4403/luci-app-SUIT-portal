@@ -1,0 +1,151 @@
+{
+  "get_login": {
+    "url": "http://10.10.16.56/cas-sso/login?flowSessionId=<会话ID>&customPageId=<页面ID>&preview=false&appType=normal&language=zh-CN&timer=<时间戳>&nasIp=10.0.0.13&userIp=<内网IP>&userMac=<加密MAC>",
+    "headers": [
+      {
+        "name": "Host",
+        "value": "10.10.16.56"
+      },
+      {
+        "name": "Upgrade-Insecure-Requests",
+        "value": "1"
+      },
+      {
+        "name": "User-Agent",
+        "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
+      },
+      {
+        "name": "Accept",
+        "value": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"
+      },
+      {
+        "name": "Referer",
+        "value": "http://10.10.16.56/portal/entry/pc/authenticate;flowParams=undefined;from="
+      },
+      {
+        "name": "Accept-Encoding",
+        "value": "gzip, deflate"
+      },
+      {
+        "name": "Accept-Language",
+        "value": "zh-CN,zh;q=0.9"
+      },
+      {
+        "name": "Cookie",
+        "value": "SESSION=0f4203b5-f01c-444e-b706-debfa78af35d; SESSION=692a465c-7543-411b-9a5b-d199eddddcab"
+      }
+    ],
+    "status": 200,
+    "resp_headers": [
+      {
+        "name": "Date",
+        "value": "<已脱敏>"
+      },
+      {
+        "name": "Content-Type",
+        "value": "text/html;charset=UTF-8"
+      },
+      {
+        "name": "Transfer-Encoding",
+        "value": "chunked"
+      },
+      {
+        "name": "Connection",
+        "value": "keep-alive"
+      },
+      {
+        "name": "Pragma",
+        "value": "no-cache"
+      },
+      {
+        "name": "Content-Language",
+        "value": "zh-CN"
+      }
+    ]
+  },
+  "post_login": {
+    "url": "http://10.10.16.56/cas-sso/login?flowSessionId=<会话ID>&customPageId=<页面ID>&preview=false&appType=normal&language=zh-CN&timer=<时间戳>&nasIp=10.0.0.13&userIp=<内网IP>&userMac=<加密MAC>&accept-language=zh-CN",
+    "headers": [
+      {
+        "name": "Host",
+        "value": "10.10.16.56"
+      },
+      {
+        "name": "Content-Length",
+        "value": "169"
+      },
+      {
+        "name": "Cache-Control",
+        "value": "max-age=0"
+      },
+      {
+        "name": "Origin",
+        "value": "http://10.10.16.56"
+      },
+      {
+        "name": "Content-Type",
+        "value": "application/x-www-form-urlencoded"
+      },
+      {
+        "name": "Upgrade-Insecure-Requests",
+        "value": "1"
+      },
+      {
+        "name": "User-Agent",
+        "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
+      },
+      {
+        "name": "Accept",
+        "value": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"
+      },
+      {
+        "name": "Referer",
+        "value": "http://10.10.16.56/pc/center?flowSessionId=<会话ID>&customPageId=<页面ID>&preview=false&appType=normal&language=zh-CN&timer=<时间戳>&nasIp=10.0.0.13&userIp=<内网IP>&userMac=<加密MAC>"
+      },
+      {
+        "name": "Accept-Encoding",
+        "value": "gzip, deflate"
+      },
+      {
+        "name": "Accept-Language",
+        "value": "zh-CN,zh;q=0.9"
+      },
+      {
+        "name": "Cookie",
+        "value": "SESSION=0f4203b5-f01c-444e-b706-debfa78af35d; SESSION=692a465c-7543-411b-9a5b-d199eddddcab"
+      }
+    ],
+    "status": 302,
+    "resp_headers": [
+      {
+        "name": "Date",
+        "value": "<已脱敏>"
+      },
+      {
+        "name": "Content-Length",
+        "value": "0"
+      },
+      {
+        "name": "Connection",
+        "value": "keep-alive"
+      },
+      {
+        "name": "Pragma",
+        "value": "no-cache"
+      },
+      {
+        "name": "Set-Cookie",
+        "value": "SOURCEID_TGC=<TGC票据，已脱敏>; Path=/cas-sso/; HttpOnly"
+      },
+      {
+        "name": "Set-Cookie",
+        "value": "rg_objectid=<对象ID，已脱敏>; HttpOnly"
+      },
+      {
+        "name": "Location",
+        "value": "http://10.10.16.56/portal/assets/auth-success.html?ticket=<CAS票据，已脱敏>&i18n_lang=zh"
+      }
+    ],
+    "post_body": "username=<你的账号>&type=UsernamePassword&_eventId=submit&geolocation=&execution=<执行令牌，约6700字符，已脱敏>&captcha_code=&croypto=<AES密钥>&password=<AES密文>&captcha_payload=<加密的空JSON>"
+  }
+}

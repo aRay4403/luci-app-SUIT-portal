@@ -1,0 +1,102 @@
+#!/bin/sh /etc/rc.common
+###############################################################################
+# 校园网 ePortal 自动认证 服务脚本 (OpenWrt / procd)
+#
+# 安装:
+#   cp portal-auth.sh /usr/bin/portal-auth.sh && chmod +x /usr/bin/portal-auth.sh
+#   cp portal-auth.init /etc/init.d/portal-auth && chmod +x /etc/init.d/portal-auth
+#   cp portal-auth.conf /etc/portal-auth.conf && chmod 600 /etc/portal-auth.conf
+#
+# 使用:
+#   /etc/init.d/portal-auth start     启动
+#   /etc/init.d/portal-auth enable    开机自启
+#   /etc/init.d/portal-auth status    查看状态
+###############################################################################
+
+START=99
+STOP=10
+USE_PROCD=1
+
+PROG=/usr/bin/portal-auth.sh
+CONF=/etc/portal-auth.conf
+INTERVAL=30          # 在线时的检测间隔（秒）
+INTERVAL_OFFLINE=5   # 离线 / 认证失败时的重试间隔（秒）—— 断网后要尽快恢复
+INTERVAL_OFFLINE_MAX=60  # 长时间失败时的退避上限（秒）
+OFFLINE_FAST_TRIES=12    # 先按 5 秒快跑多少次，再开始退避（约 1 分钟）
+
+# 供 status 显示用：记录守护进程最近一次的间隔
+STATE=/var/run/portal-auth.state
+
+start_service() {
+    # 加载配置（conf 里的 INTERVAL / INTERVAL_OFFLINE 可覆盖上面的默认值）
+    [ -f "$CONF" ] && . "$CONF"
+    [ -n "$INTERVAL_OFFLINE" ] || INTERVAL_OFFLINE=5
+    [ -n "$INTERVAL" ] || INTERVAL=30
+    [ -n "$INTERVAL_OFFLINE_MAX" ] || INTERVAL_OFFLINE_MAX=60
+    [ -n "$OFFLINE_FAST_TRIES" ] || OFFLINE_FAST_TRIES=12
+    mkdir -p "$(dirname "$STATE")" 2>/dev/null
+
+    # 自适应间隔：
+    #   主脚本退出 0（在线 / 本次认证成功）-> 慢速轮询 INTERVAL 秒
+    #   主脚本退出非 0（离线且认证失败）  -> 快速重试 INTERVAL_OFFLINE 秒
+    # 这样断网后最长约 INTERVAL + 一次认证耗时 即可恢复，而不是干等 30 秒。
+    #
+    # 【2026-10-04 新增退避】长时间失败必须退避，否则每 5 秒砸一次认证服务器：
+    #   实测「掉线后一直连不上」的场景里，守护进程按 5 秒重试了上万次，
+    #   只会把账号/IP 送进风控，问题反而更难恢复。
+    #   策略：前 OFFLINE_FAST_TRIES 次（约 1 分钟）保持 5 秒快速重试，
+    #         之后线性退避到 INTERVAL_OFFLINE_MAX（默认 60 秒）；一旦成功立刻复位。
+    procd_open_instance
+    procd_set_param command /bin/sh -c "
+        # 开机时 netifd 可能还没把 WAN 拉起来。没有默认路由就别急着跑第一轮，
+        # 否则 nc 会挂在半路上（旧版实测一轮要 4 分钟）。最多等 60 秒。
+        i=0
+        while [ \$i -lt 60 ]; do
+            ip route show default 2>/dev/null | grep -q default && break
+            sleep 2
+            i=\$((i + 2))
+        done
+        iv=$INTERVAL
+        ivoff=$INTERVAL_OFFLINE
+        ivmax=$INTERVAL_OFFLINE_MAX
+        fast=$OFFLINE_FAST_TRIES
+        fail=0
+        prev=2
+        while true; do
+            # 脚本自身已写 /var/log/portal-auth.log，这里只关心退出码
+            if $PROG >/dev/null 2>&1; then
+                iv=$INTERVAL; st=0; fail=0
+            else
+                fail=\$((fail + 1))
+                if [ \"\$fail\" -le \"\$fast\" ]; then
+                    iv=\$ivoff
+                else
+                    iv=\$((ivoff * (fail - fast + 1)))
+                    [ \"\$iv\" -gt \"\$ivmax\" ] && iv=\$ivmax
+                fi
+                st=1
+            fi
+            # 只在「在线 <-> 离线」翻转时打一条 syslog，
+            # 避免每 30 秒刷屏；排障时 LuCI 的系统日志里就能看到掉线/恢复时刻
+            if [ \"\$st\" != \"\$prev\" ]; then
+                if [ \"\$st\" = 0 ]; then
+                    logger -t portal-auth \"校园网：已在线\"
+                else
+                    logger -t portal-auth \"校园网：掉线或认证失败，先按 \$ivoff 秒重试，连续失败后逐步退避到 \$ivmax 秒\"
+                fi
+                prev=\$st
+            fi
+            echo \$iv > $STATE
+            sleep \$iv
+        done
+    "
+    procd_set_param respawn          # 进程意外退出自动重启
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_close_instance
+}
+
+stop_service() {
+    # 终止所有 portal-auth.sh 进程
+    killall portal-auth.sh 2>/dev/null
+}

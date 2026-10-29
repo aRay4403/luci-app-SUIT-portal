@@ -1,0 +1,79 @@
+#!/bin/sh
+# apkcheck-allow-old-name: 本文件是「SZIIT → SUIT 改名」的迁移脚本，必须引用旧包名，
+#   否则没法把旧配置里的账号密码搬过来。发布前的 sziit 残留检查请豁免本文件。
+###############################################################################
+# suit-portal 首次安装时执行一次（OpenWrt uci-defaults 机制）
+#
+# 做四件事：
+#   0) 从旧包名 sziit-portal 迁移 UCI 配置（**账号密码就在里面，必须搬**）
+#   1) 若检测到旧版手工部署（/etc/portal-auth.conf + /etc/init.d/portal-auth），
+#      把账号密码等迁移进 UCI，并停用旧服务（**不删文件**，方便随时回退）
+#   2) 保证必填项有值
+#   3) 启用并启动新服务
+###############################################################################
+
+CONF=/etc/portal-auth.conf
+OLD_INIT=/etc/init.d/portal-auth
+OLD_UCI=/etc/config/sziit-portal
+
+# ---- 0) 旧包名配置迁移 ---------------------------------------------------
+#
+# 【2026-10-05】学校升格为「深圳信息职业技术大学」，官方英文缩写从 SZIIT
+# （Shenzhen Institute of Information Technology）改为 SUIT
+# （Shenzhen University of Information Technology，官网域名 suit-sz.edu.cn），
+# 包名随之从 sziit-portal 改为 suit-portal。
+#
+# 旧包的 UCI 配置在 /etc/config/sziit-portal，里面存着账号密码 ——
+# 不搬过来的话，用户升级后得重新填一遍。段名是 config service 'main'，
+# 新旧一致，所以直接整文件复制即可。
+#
+# ⚠️ 判据不能写「新配置文件不存在」—— apk 是**先解包（把包内空模板装到
+#    /etc/config/suit-portal）再跑 postinst**，所以到这里时新文件必然已存在。
+#    改成看**新配置里的账号是不是空的**：空、且旧配置里有账号 → 搬过来。
+#    这样无论 uci-defaults 是在解包前还是解包后执行，判断都成立。
+if [ -f "$OLD_UCI" ]; then
+	_new_user=$(uci -q get suit-portal.main.username 2>/dev/null)
+	_old_user=$(uci -q get sziit-portal.main.username 2>/dev/null)
+	if [ -z "$_new_user" ] && [ -n "$_old_user" ]; then
+		cp "$OLD_UCI" /etc/config/suit-portal
+		uci -q commit suit-portal
+		logger -t suit-portal "已从 $OLD_UCI 迁移旧包配置（账号密码已保留）"
+	fi
+fi
+
+# ---- 1) 旧版手工部署迁移 -------------------------------------------------
+if [ -f "$CONF" ]; then
+	# 只在 UCI 里还没填账号时才迁移，避免覆盖用户后来在 LuCI 上改的值
+	_cur=$(uci -q get suit-portal.main.username 2>/dev/null)
+	if [ -z "$_cur" ]; then
+		# shellcheck disable=SC1090
+		. "$CONF" 2>/dev/null
+		[ -n "$PORTAL_USER" ] && uci -q set "suit-portal.main.username=$PORTAL_USER"
+		[ -n "$PORTAL_PASS" ] && uci -q set "suit-portal.main.password=$PORTAL_PASS"
+		[ -n "$PORTAL_SERVICE" ] && uci -q set "suit-portal.main.service=$PORTAL_SERVICE"
+		[ -n "$PORTAL_HOST" ] && uci -q set "suit-portal.main.portal_host=$PORTAL_HOST"
+		[ -n "$PORTAL_ENTRY_URL" ] && uci -q set "suit-portal.main.entry_url=$PORTAL_ENTRY_URL"
+		uci -q commit suit-portal
+		logger -t suit-portal "已从 $CONF 迁移旧配置到 UCI"
+	fi
+
+	# 停用旧服务，避免和新服务抢着认证
+	if [ -x "$OLD_INIT" ]; then
+		"$OLD_INIT" stop  >/dev/null 2>&1
+		"$OLD_INIT" disable >/dev/null 2>&1
+		logger -t suit-portal "已停用旧服务 portal-auth（文件保留，可手工回退）"
+	fi
+fi
+
+# ---- 2) 必填项兜底 -------------------------------------------------------
+uci -q get suit-portal.main.portal_host >/dev/null 2>&1 || \
+	uci -q set suit-portal.main.portal_host='10.10.16.56'
+uci -q get suit-portal.main.service >/dev/null 2>&1 || \
+	uci -q set suit-portal.main.service='电信宽带'
+uci -q commit suit-portal
+
+# ---- 3) 启用服务 ---------------------------------------------------------
+/etc/init.d/suit-portal enable >/dev/null 2>&1
+/etc/init.d/suit-portal restart >/dev/null 2>&1
+
+exit 0

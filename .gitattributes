@@ -1,0 +1,9 @@
+# 统一用 LF 换行。
+# 这些 .sh / init 脚本要跑在路由器的 busybox sh 上，CRLF 会让 shebang 变成
+# "/bin/sh\r" → 报 "not found"，整个包都起不来。
+* text=auto eol=lf
+
+# 二进制不要做任何换行/文本处理
+*.apk binary
+*.png binary
+*.gz  binary

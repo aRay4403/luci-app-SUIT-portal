@@ -1,0 +1,395 @@
+#!/usr/bin/env node
+/**
+ * 深圳信息职业技术大学 校园网 ePortal 自动认证
+ *
+ * 流程（依 HAR 实测还原）：
+ *   1. GET  /cas-sso/login?...        -> 解析 execution(JWT) 与 login-croypto(AES密钥)
+ *   2. POST /cas-sso/login            -> AES-128-ECB/PKCS7 加密密码, 提交, 302 得 CAS ticket
+ *   3. POST /eportal/workFlow/getCurrentNode  -> 推进到 serviceSelection 节点
+ *   4. POST /eportal/network/serviceSelection -> 查询可选运营商
+ *   5. POST /eportal/network/serviceLogin     -> 选定运营商, authResult=success 即成功
+ *
+ * 加密: AES-128-ECB / PKCS7, key = base64decode(croypto)
+ */
+
+const http = require('http');
+const crypto = require('crypto');
+const { URL } = require('url');
+
+const CONFIG = {
+  portal: process.env.PORTAL_HOST || '10.10.16.56',
+  username: process.env.PORTAL_USER || '',
+  password: process.env.PORTAL_PASS || '',
+  service: process.env.PORTAL_SERVICE || '电信宽带',
+  timeout: 15000,
+};
+
+// ---------- 极简 HTTP 客户端（保留重定向控制与 cookie） ----------
+function makeJar() {
+  const jar = new Map();
+  return {
+    set(cookieHeader) {
+      // 支持多个 Set-Cookie 合并传入
+      String(cookieHeader).split(/,(?=[^;=]+=)/).forEach(part => {
+        const kv = part.split(';')[0].trim();
+        const idx = kv.indexOf('=');
+        if (idx > 0) jar.set(kv.slice(0, idx), kv.slice(idx + 1));
+      });
+    },
+    header() {
+      return [...jar.entries()].map(([k, v]) => `${k}=${v}`).join('; ');
+    },
+  };
+}
+
+function request(opts, jar) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(opts.url);
+    const headers = Object.assign({
+      'Host': u.host,
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'zh-CN,zh;q=0.9',
+      'Connection': 'close',
+    }, opts.headers || {});
+
+    const cookie = jar.header();
+    if (cookie) headers['Cookie'] = cookie;
+
+    const req = http.request({
+      hostname: u.hostname,
+      port: u.port || 80,
+      path: u.pathname + u.search,
+      method: opts.method || 'GET',
+      headers,
+      timeout: CONFIG.timeout,
+    }, res => {
+      const sc = res.headers['set-cookie'];
+      if (sc) jar.set(sc.join(','));
+
+      let chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => {
+        resolve({
+          status: res.statusCode,
+          headers: res.headers,
+          body: Buffer.concat(chunks).toString('utf8'),
+        });
+      });
+    });
+
+    req.on('timeout', () => { req.destroy(new Error('请求超时')); });
+    req.on('error', reject);
+
+    if (opts.body) req.write(opts.body);
+    req.end();
+  });
+}
+
+// ---------- AES-128-ECB / PKCS7 加密（对应前端 CryptoJS） ----------
+function aesEncrypt(plain, keyBase64) {
+  const key = Buffer.from(keyBase64, 'base64');
+  if (key.length !== 16) throw new Error(`croypto 密钥长度异常: ${key.length} 字节（应为16）`);
+  const cipher = crypto.createCipheriv('aes-128-ecb', key, null);
+  cipher.setAutoPadding(true); // PKCS7
+  return Buffer.concat([cipher.update(plain, 'utf8'), cipher.final()]).toString('base64');
+}
+
+// ---------- HTML 中提取隐藏字段 ----------
+// 该 SSO 页面把运行期参数放在一组 <p id="xxx">VALUE</p> 元素里，
+// 前端 JS 用 document.getElementById(...).innerText 读取。
+//   登录流程密钥: id="login-page-flowkey"  -> 提交时的 execution 字段
+//   加密密钥:     id="login-croypto"       -> AES-128 密钥(base64)
+function extractP(html, id) {
+  const m = html.match(new RegExp(`<p[^>]*id=["']${id}["'][^>]*>([^<]*)</p>`, 'i'));
+  return m ? m[1].trim() : null;
+}
+
+function extractField(html, idOrName) {
+  // 优先按 <p id="xxx">VALUE</p> 取
+  const byP = extractP(html, idOrName);
+  if (byP !== null) return byP;
+  // 兜底：<input name="xxx" value="VALUE">
+  let m = html.match(new RegExp(`name=["']${idOrName}["'][^>]*value=["']([^"']*)["']`, 'i'));
+  if (m) return m[1];
+  m = html.match(new RegExp(`value=["']([^"']*)["'][^>]*name=["']${idOrName}["']`, 'i'));
+  return m ? m[1] : null;
+}
+
+// execution 的真实来源就是 login-page-flowkey
+function extractExecution(html) {
+  return extractP(html, 'login-page-flowkey');
+}
+
+function qs(params) {
+  return Object.entries(params)
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+    .join('&');
+}
+
+// ---------- 工具: 解析 URL query ----------
+function parseQuery(url) {
+  const q = {};
+  const i = url.indexOf('?');
+  if (i < 0) return q;
+  url.slice(i + 1).split('&').forEach(kv => {
+    const [k, v = ''] = kv.split('=');
+    if (k) { try { q[decodeURIComponent(k)] = decodeURIComponent(v); } catch (_) { q[k] = v; } }
+  });
+  return q;
+}
+
+// ---------- Step 0: 建立 portal 会话 ----------
+// 依 HAR 实测：认证入口参数 (wlanuserip/nasip/mac/...) 由网关在 302 重定向时下发，
+// 无法自行拼装。因此必须先"制造一次被拦截的外网访问"，从跳转 URL 中捕获这些参数。
+//
+//  1) GET 任意外网地址(明文HTTP) -> 302 到 <portal>/eportal/index.jsp?wlanuserip=..&mac=..
+//  2) 带参数 GET eportal/index.jsp -> 302 到 /portal/portal-main?sessionId=..&userIp=..&userMac=..&nasIp=..
+//  3) 从 portal-main URL 提取 sessionId / userIp / userMac / nasIp / customPageId
+async function openPortalSession(jar, base) {
+  // --- 1) 触发网关拦截，捕获重定向 URL ---
+  const probeTargets = [
+    'http://123.123.123.123/',
+    'http://connect.rom.miui.com/generate_204',
+    'http://www.msftconnecttest.com/connecttest.txt',
+  ];
+
+  let eportalUrl = null;
+  for (const t of probeTargets) {
+    try {
+      const r = await request({ url: t }, jar);
+      const loc = r.headers.location || '';
+      if (loc.includes('eportal')) { eportalUrl = loc; break; }
+      if (loc.includes(CONFIG.portal)) {
+        const abs = loc.startsWith('http') ? loc : base + loc;
+        if (abs.includes('eportal')) { eportalUrl = abs; break; }
+      }
+    } catch (_) { /* 尝试下一个探测点 */ }
+  }
+
+  if (!eportalUrl) {
+    throw new Error('未能触发网关拦截（可能已在线，或探测地址不可达）。请先断开认证后重试。');
+  }
+  const absEportal = eportalUrl.startsWith('http') ? eportalUrl : base + eportalUrl;
+
+  // --- 2) 访问 eportal 入口，拿 portal-main 跳转 ---
+  const r2 = await request({ url: absEportal }, jar);
+  const loc2 = r2.headers.location || '';
+  const absMain = loc2.startsWith('http') ? loc2 : (loc2 ? base + loc2 : '');
+
+  if (absMain.includes('portal-main')) {
+    const q = parseQuery(absMain);
+    if (q.sessionId) {
+      return {
+        flowSessionId: q.sessionId,
+        userIp: q.userIp || '',
+        userMac: q.userMac || '',
+        nasIp: q.nasIp || '',
+        customPageId: q.customPageId || '',
+        portalMainUrl: absMain,
+      };
+    }
+  }
+
+  // --- 3) 兜底：在 portal-main 正文里找 sessionId ---
+  const pm = await request({ url: absMain || `${base}/portal/portal-main` }, jar);
+  const m = pm.body.match(/sessionId["'\s:=]+([a-f0-9]{6,})/i);
+  if (m) {
+    return { flowSessionId: m[1], userIp: '', userMac: '', nasIp: '', customPageId: '', portalMainUrl: absMain };
+  }
+  throw new Error('无法建立 portal 会话（未取得 sessionId）');
+}
+
+// ---------- 在线状态检测 ----------
+// 未认证时，网关会把外网请求 302 到认证页；已认证则直接放行。
+// 用一个"必定存在且极轻"的外网探测地址判断，避免误判。
+async function checkOnline() {
+  try {
+    const res = await request({
+      url: `http://${CONFIG.portal}/eportal/network/onlineCheck`,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': 2 },
+      body: '{}',
+    }, makeJar());
+    // 能直接拿到 JSON 即为已认证上下文
+    if (res.status === 200 && res.body.trim().startsWith('{')) return true;
+  } catch (_) { /* 忽略 */ }
+
+  // 兜底：探测外网，若被重定向到本地认证页说明未认证
+  try {
+    const res = await request({ url: 'http://connect.rom.miui.com/generate_204' }, makeJar());
+    if (res.status === 204) return true;
+    const loc = res.headers.location || '';
+    if (loc.includes(CONFIG.portal)) return false;
+    if (res.status === 200) return true;
+  } catch (_) { /* 网络异常视为离线 */ }
+  return false;
+}
+
+// ---------- 主流程 ----------
+async function authenticate() {
+  const jar = makeJar();
+  const base = `http://${CONFIG.portal}`;
+
+  if (!CONFIG.username || !CONFIG.password) {
+    throw new Error('未配置用户名或密码（环境变量 PORTAL_USER / PORTAL_PASS）');
+  }
+
+  // --- Step 0: 触发 portal 主流程，获取 flowSessionId 等上下文 ---
+  // 直接裸请求 /cas-sso/login 只能拿到通用登录页（无 flowSessionId），
+  // 必须先从 portal 入口拿会话，否则后续 eportal 工作流无法关联。
+  console.log('[0/5] 初始化 portal 会话...');
+  const sess = await openPortalSession(jar, base);
+  console.log(`      flowSessionId=${sess.flowSessionId}`);
+  console.log(`      userIp=${sess.userIp} userMac=${sess.userMac} nasIp=${sess.nasIp}`);
+
+  // --- Step 1: 拿登录页，解析 execution 与 croypto ---
+  console.log('[1/5] 获取登录页...');
+  const loginUrl = `${base}/cas-sso/login?` + qs({
+    flowSessionId: sess.flowSessionId,
+    customPageId: sess.customPageId,
+    preview: 'false',
+    appType: 'normal',
+    language: 'zh-CN',
+    timer: Date.now(),
+    nasIp: sess.nasIp,
+    userIp: sess.userIp,
+    userMac: sess.userMac,
+  });
+  const page = await request({ url: loginUrl }, jar);
+  if (page.status !== 200) throw new Error(`登录页返回 ${page.status}`);
+
+  const execution = extractExecution(page.body);
+  const croypto = extractP(page.body, 'login-croypto');
+  if (!execution || !croypto) {
+    throw new Error(`无法解析 execution/croypto（execution=${!!execution}, croypto=${!!croypto}）`);
+  }
+  console.log(`      execution=${execution.slice(0, 40)}...`);
+  console.log(`      croypto=${croypto}`);
+
+  // --- Step 2: 提交加密后的账号密码 ---
+  console.log('[2/5] 提交登录...');
+  const encPw = aesEncrypt(CONFIG.password, croypto);
+  const loginBody = qs({
+    username: CONFIG.username,
+    type: 'UsernamePassword',
+    _eventId: 'submit',
+    geolocation: '',
+    execution: execution,
+    captcha_code: '',
+    croypto: croypto,
+    password: encPw,
+  });
+  const loginRes = await request({
+    url: loginUrl,
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'Content-Length': Buffer.byteLength(loginBody),
+      'Origin': base,
+      'Referer': loginUrl,
+    },
+    body: loginBody,
+  }, jar);
+
+  if (loginRes.status !== 302) {
+    throw new Error(`登录失败，返回 ${loginRes.status}（预期302）。可能账号密码错误或需验证码。`);
+  }
+  const loc = loginRes.headers.location || '';
+  const ticket = (loc.match(/ticket=([^&]+)/) || [])[1];
+  console.log(`      登录成功 -> 302, ticket=${ticket ? ticket.slice(0, 30) + '...' : '(未捕获)'}`);
+
+  // --- Step 3~5: eportal 工作流 ---
+  const sessionId = (() => {
+    const m = loc.match(/flowSessionId=([^&]+)/) || page.body.match(/flowSessionId["':\s]+([a-f0-9]+)/);
+    return m ? m[1] : null;
+  })();
+
+  // 尝试从 ticket 跳转链推断 flowSessionId；若无则请求 getCurrentNode 前先访问登录页
+  console.log('[3/5] 推进认证工作流...');
+
+  async function postJson(path, obj) {
+    const body = JSON.stringify(obj);
+    const res = await request({
+      url: base + path,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
+        'Origin': base,
+        'Referer': `${base}/portal/portal-main`,
+      },
+      body,
+    }, jar);
+    let json = null;
+    try { json = JSON.parse(res.body); } catch (_) {}
+    return { status: res.status, json, raw: res.body };
+  }
+
+  // 若未捕获 sessionId，先访问一次 portal 首页触发
+  let sid = sessionId;
+  if (!sid) {
+    const p = await request({ url: `${base}/portal/portal-main` }, jar);
+    const m = p.body.match(/sessionId["':\s]+([a-f0-9]{6,})/);
+    sid = m ? m[1] : null;
+  }
+  if (!sid) throw new Error('无法获取 sessionId');
+
+  const node = await postJson('/eportal/workFlow/getCurrentNode', { sessionId: sid, flowKey: 'portal_auth' });
+  console.log(`      当前节点: ${node.json?.data?.currentNodePath || '?'}`);
+
+  // --- Step 4: 查询运营商 ---
+  console.log('[4/5] 查询运营商...');
+  const sel = await postJson('/eportal/network/serviceSelection', { sessionId: sid });
+  const services = (sel.json?.data || []).map(x => x.value);
+  console.log(`      可选: ${services.join(' / ')}`);
+
+  const chosen = services.includes(CONFIG.service) ? CONFIG.service : (services.find(s => s !== 'default') || CONFIG.service);
+
+  // --- Step 5: 提交运营商完成认证 ---
+  console.log(`[5/5] 使用「${chosen}」完成认证...`);
+  const fin = await postJson('/eportal/network/serviceLogin', { sessionId: sid, service: chosen });
+  const result = fin.json?.data?.authResult;
+  const msg = fin.json?.data?.authMessage;
+
+  if (result === 'success') {
+    console.log(`\n✅ 认证成功！(${chosen})`);
+    return { ok: true, service: chosen };
+  }
+  throw new Error(`认证失败: authResult=${result}, message=${msg}`);
+}
+
+// ---------- CLI ----------
+async function main() {
+  const args = process.argv.slice(2);
+  const forceRun = args.includes('--force');   // 忽略在线检测，强制认证
+  const checkOnly = args.includes('--check');  // 只检测在线状态
+
+  if (checkOnly) {
+    const online = await checkOnline();
+    console.log(online ? '在线' : '离线');
+    return online ? 0 : 1;
+  }
+
+  if (!forceRun) {
+    console.log('检测在线状态...');
+    if (await checkOnline()) {
+      console.log('✅ 已在线，无需认证。');
+      return 0;
+    }
+    console.log('离线，开始认证...\n');
+  } else {
+    console.log('强制认证模式\n');
+  }
+
+  await authenticate();
+  return 0;
+}
+
+if (require.main === module) {
+  main()
+    .then(code => process.exit(code))
+    .catch(e => { console.error(`\n❌ ${e.message}`); process.exit(1); });
+}
+
+module.exports = { authenticate, aesEncrypt, extractField, extractExecution, extractP, checkOnline };
