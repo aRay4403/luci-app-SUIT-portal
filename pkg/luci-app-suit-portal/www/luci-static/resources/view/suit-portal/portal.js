@@ -266,17 +266,19 @@ return view.extend({
 		/*
 		 * 运营商做成下拉选择（原来是个文本输入框，容易填错）。
 		 * 注意：认证服务器 /eportal/network/serviceSelection 是**动态返回**运营商列表的，
-		 * 实机（2026-10-04）只返回 {"key":"default"} 和 {"key":"电信宽带"} 两项。
-		 * 但脚本有 fallback：配置值不在服务端列表里时会自动取第一个非 default 的项，
-		 * 所以这里列全三大运营商是安全的 —— 选了服务端没提供的，脚本会自动回退，不会认证失败。
+		 * 实机（2026-10-04）只返回 {"key":"default"} 和 {"key":"电信宽带"} 两项，
+		 * 其中 default 就是**校园网**（校内出口）。
+		 * 脚本有 fallback：配置值不在服务端列表里时会自动回退（优先 default），
+		 * 所以这里把校园网和三大运营商都列出来是安全的 —— 选了服务端没提供的会自动回退，不会认证失败。
 		 */
 		o = s.option(form.ListValue, 'service', _('运营商'));
+		o.value('default', _('校园网（Default）'));
 		o.value('电信宽带', _('电信宽带'));
 		o.value('移动宽带', _('移动宽带'));
 		o.value('联通宽带', _('联通宽带'));
-		o.default = '电信宽带';
+		o.default = 'default';
 		o.rmempty = false;
-		o.description = _('若所选运营商服务端未提供，脚本会自动回退到实际可用的那一项。');
+		o.description = _('默认走校园网（Default）。若所选运营商服务端未提供，脚本会自动回退。');
 
 		o = s.option(form.Value, 'portal_host', _('认证服务器'));
 		o.default = '10.10.16.56';

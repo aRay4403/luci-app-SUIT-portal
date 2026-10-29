@@ -93,11 +93,15 @@ module.exports = async ({ page, ok, shot, wait }) => {
 		'校园网账号已回显（长度 ' + (username ? username.length : 0) + '）');
 	ok(password === '__PWD__', '密码字段为 password 类型（不回显明文）');
 	ok(serviceTag === 'SELECT', '运营商已改成下拉选择框（实际标签: ' + serviceTag + '）');
-	ok(serviceOpts.length === 3,
-		'运营商下拉有 3 个选项（实际: ' + JSON.stringify(serviceOpts) + '）');
-	ok(serviceOpts.indexOf('电信宽带') >= 0 && serviceOpts.indexOf('移动宽带') >= 0
-		&& serviceOpts.indexOf('联通宽带') >= 0, '下拉包含电信 / 移动 / 联通三项');
-	ok(service === '电信宽带', '运营商当前选中 = 电信宽带（实际: ' + service + '）');
+	ok(serviceOpts.length === 4,
+		'运营商下拉有 4 个选项（实际: ' + JSON.stringify(serviceOpts) + '）');
+	ok(serviceOpts.indexOf('default') >= 0
+		&& serviceOpts.indexOf('电信宽带') >= 0 && serviceOpts.indexOf('移动宽带') >= 0
+		&& serviceOpts.indexOf('联通宽带') >= 0,
+		'下拉包含校园网(default) / 电信 / 移动 / 联通四项');
+	// 不断言具体选中的是哪一项（各人配置不同）——只要求它在选项里
+	ok(serviceOpts.indexOf(service) >= 0,
+		'运营商当前值在下拉选项内（实际: ' + service + '）');
 	ok(host === '10.10.16.56', '认证服务器回显正确（实际: ' + host + '）');
 	ok(ivOn === '30', '在线检测间隔 = 30（实际: ' + ivOn + '）');
 	ok(ivOff === '5', '掉线重试间隔 = 5（实际: ' + ivOff + '）');

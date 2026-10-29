@@ -69,7 +69,7 @@ fi
 uci -q get suit-portal.main.portal_host >/dev/null 2>&1 || \
 	uci -q set suit-portal.main.portal_host='10.10.16.56'
 uci -q get suit-portal.main.service >/dev/null 2>&1 || \
-	uci -q set suit-portal.main.service='电信宽带'
+	uci -q set suit-portal.main.service='default'
 uci -q commit suit-portal
 
 # ---- 3) 启用服务 ---------------------------------------------------------

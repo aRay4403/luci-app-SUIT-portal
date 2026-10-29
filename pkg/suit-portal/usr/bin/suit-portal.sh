@@ -41,7 +41,7 @@
 PORTAL_HOST="${PORTAL_HOST:-10.10.16.56}"
 PORTAL_USER="${PORTAL_USER:-}"
 PORTAL_PASS="${PORTAL_PASS:-}"
-PORTAL_SERVICE="${PORTAL_SERVICE:-电信宽带}"
+PORTAL_SERVICE="${PORTAL_SERVICE:-default}"
 
 # 网关接口（认证出口，通常是 br-lan 或物理 WAN 口）
 AUTH_IFACE="${AUTH_IFACE:-}"
@@ -1461,10 +1461,16 @@ auth_query_services() {
         sed -n 's/.*"key"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
     log "      可选: $(printf '%s' "$_services" | tr '\n' ' ')"
 
-    # 选定运营商：优先用户配置，否则取第一个非 default
+    # 选定运营商：优先用户配置；配置值服务端没提供时回退到**校园网(default)**，
+    # 再不行才取列表第一项。默认走校园网，不占运营商流量。
     _chosen="$PORTAL_SERVICE"
     if ! printf '%s' "$_services" | grep -qx "$_chosen"; then
-        _chosen=$(printf '%s' "$_services" | grep -vx "default" | head -1)
+        if printf '%s' "$_services" | grep -qx "default"; then
+            _chosen="default"
+            log "      配置的「$PORTAL_SERVICE」服务端未提供，回退到校园网(default)"
+        else
+            _chosen=$(printf '%s' "$_services" | head -1)
+        fi
     fi
     [ -z "$_chosen" ] && _chosen="$PORTAL_SERVICE"
     log "      选定: $_chosen"

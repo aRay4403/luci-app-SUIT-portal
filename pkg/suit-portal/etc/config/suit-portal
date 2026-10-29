@@ -21,8 +21,9 @@ config service 'main'
 	option username ''
 	option password ''
 
-	# 运营商（认证流程里 serviceSelection 会列出可选项，这里填要用的那个）
-	option service '电信宽带'
+	# 运营商：default = 校园网（校内出口）；也可填 电信宽带 / 移动宽带 / 联通宽带
+	# serviceSelection 会动态列出可选项，填了服务端没提供的会自动回退（优先 default）
+	option service 'default'
 
 	# 在线时的检测间隔（秒）
 	option interval '30'
