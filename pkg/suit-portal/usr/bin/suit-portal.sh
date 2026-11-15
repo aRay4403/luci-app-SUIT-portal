@@ -1251,14 +1251,32 @@ auth_probe_entry() {
         if [ "$_cd_left" -gt 0 ] && [ "${FORCE_OFFLINE:-0}" != "1" ]; then
             log "      → 主动下线冷却中（还剩 ${_cd_left} 秒，${OFFLINE_COOLDOWN} 秒一次），先不重复踢"
         elif offline_now; then
-            log "      → 已主动下线，等 AC 重新下发入口（最多 12 秒）..."
-            _pw=0
-            while [ "$_pw" -lt 6 ]; do
-                sleep 2
-                _pw=$(( _pw + 1 ))
+            # 【2026-11-16 修正】原来写「最多 12 秒」，实际是 6 轮 × 每轮两次探测
+            #   （每次 6 秒超时）+ 每轮 sleep 2 = **实测 74 秒**（05:06:36 -> 05:07:50）。
+            #   改成按**截止时间**算：15 秒内能抓到就继续，抓不到就想别的办法。
+            log "      → 已主动下线，等 AC 重新下发入口（最多 15 秒）..."
+            _pw_end=$(( $(date +%s) + 15 ))
+            while [ "$(date +%s)" -lt "$_pw_end" ]; do
                 probe_once && break
+                sleep 2
             done
-            [ -n "$_eportal_url" ] && log "      → 下线后重新捕获到入口"
+
+            # 还是没劫持：直接问 AC 自己的门户页（它未认证时总下发入口）。
+            # 复用 suit-portal-freshen —— 它内部会校验 userIp == 当前 WAN IP 才写回，
+            # 所以拿到的入口一定是新鲜的。没有这个脚本（旧版本）就跳过。
+            if [ -z "$_eportal_url" ] && [ -x /usr/bin/suit-portal-freshen ]; then
+                log "      → 仍无劫持，改问 AC 自己的门户页..."
+                /usr/bin/suit-portal-freshen --force >/dev/null 2>&1
+                _new_entry=$(uci -q get suit-portal.main.entry_url)
+                if [ -n "$_new_entry" ] && [ "$_new_entry" != "$PORTAL_ENTRY_URL" ]; then
+                    PORTAL_ENTRY_URL="$_new_entry"
+                    _entry_fresh=1
+                    _eportal_url="$PORTAL_ENTRY_URL"
+                    log "      → AC 门户页给出了新入口（已校验过 IP）"
+                fi
+            fi
+
+            [ -n "$_eportal_url" ] && log "      → 下线后已拿到入口"
         fi
 
         # 还是拿不到，才退回配置里的固定入口（多半是旧 IP，AC 大概率回 ACK_AUTH_REFUSE）
@@ -1634,11 +1652,35 @@ auth_verify_online() {
     # 【HAR 实测 · entry 109】/eportal/network/userOnline 返回
     #   {"data":{"online":true,...}} —— 这是服务端认定的在线状态，
     #   比探测外网 IP 可靠得多（校园网可能只放行部分端口/协议）。
+    #
+    # 【2026-11-16 修正：userOnline 只代表「这个会话对应的终端」在线，不一定是本机】
+    #   换了 MAC / 换了 IP 之后，UCI 里缓存的入口还是旧终端的（比如
+    #   会话 userIp=<旧终端IP>，而当前 WAN=<本机新IP>）——
+    #   这时 userOnline 照样回 true（那台旧终端确实在线），于是日志写「认证成功」，
+    #   20 秒后本机又离线（实机 05:08:00 -> 05:08:21）。
+    #   所以会话 userIp 与当前 WAN IP 不符时，userOnline 不能作为成功依据，
+    #   必须用真实外网探测判定。
+    _vo_wan=$(wan_ip)
+    _vo_mismatch=0
+    if [ -n "$_vo_wan" ] && [ -n "$_userip" ] && [ "$_vo_wan" != "$_userip" ]; then
+        _vo_mismatch=1
+    fi
+
     printf '{"sessionId":"%s"}' "$_sid" >"$WORK_DIR/json"
     http_post "${_base}/eportal/network/userOnline" "$WORK_DIR/json" "application/json" "${_base}/portal/portal-main" >/dev/null 2>&1
     _onl=$(printf '%s' "$(cat "$WORK_DIR/body" 2>/dev/null)" | tr -d ' \t\r\n')
     case "$_onl" in
         *'"online":true'*)
+            if [ "$_vo_mismatch" = "1" ]; then
+                log "      服务端说在线，但会话 userIp=$_userip ≠ 当前 WAN=$_vo_wan"
+                log "        那台终端不是本机（入口还是旧的），改用真实外网探测判定..."
+                if check_online; then
+                    log "认证成功！(${_chosen})"
+                    return 0
+                fi
+                log "认证未生效：入口不是本机的，需要重新获取入口"
+                return 1
+            fi
             log "      服务端确认在线 (userOnline=true)"
             log "认证成功！(${_chosen})"
             return 0
