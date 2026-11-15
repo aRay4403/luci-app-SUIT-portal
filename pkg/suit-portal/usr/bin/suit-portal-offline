@@ -1,0 +1,72 @@
+#!/bin/sh
+###############################################################################
+# /usr/bin/suit-portal-offline
+#
+# 主动下线：让 AC / 门户把本机当成「未认证设备」。
+#
+# 【为什么需要这个按钮】
+#   AC 一旦认为本机已认证，就**不再劫持**外网 HTTP（直接 DROP TCP）。
+#   此时脚本探测拿不到入口，只能复用 UCI 里缓存的旧入口；而旧入口里的
+#   wlanuserip / mac 是**加密写死**的旧值 —— WAN 换 IP 之后，服务端按旧 IP
+#   建会话，AC 那边根本没这台终端，必然回 ACK_AUTH_REFUSE。
+#   于是守护进程每 5 秒重试一次、每次都被拒，看着像「永远认证失败」。
+#
+#   主动下线会让 AC 重新把本机当未认证设备，恢复劫持 ——
+#   下一轮探测就能抓到**当前 IP** 的新入口，认证自动恢复。
+#
+#   实测（2026-11-15）：下线后 8 秒内守护进程即捕获到新入口并认证成功。
+#
+# 退出码：0 已发送下线请求；1 拿不到入口/sessionId
+###############################################################################
+
+HOST=$(uci -q get suit-portal.main.portal_host)
+[ -z "$HOST" ] && HOST=10.10.16.56
+
+ENTRY=$(uci -q get suit-portal.main.entry_url)
+
+if [ -z "$ENTRY" ]; then
+	echo "没有可用的入口 URL（entry_url 为空），无法下线。"
+	echo "可以先点「强制重新认证」让脚本抓一条入口。"
+	exit 1
+fi
+
+# ---- 1) 用当前入口换一个 sessionId ----
+# busybox nc 不支持任何选项，且 stdin 一 EOF 就立刻断开，必须 sleep 按住。
+PATH_PART=${ENTRY#http://$HOST}
+RAW=$(
+	{
+		printf 'GET %s HTTP/1.0\r\n' "$PATH_PART"
+		printf 'Host: %s\r\n' "$HOST"
+		printf 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36\r\n'
+		printf 'Accept: */*\r\n'
+		printf 'Connection: close\r\n\r\n'
+		sleep 3
+	} | nc "$HOST" 80
+)
+
+LOC=$(printf '%s' "$RAW" | sed -n 's/^[Ll]ocation:[[:space:]]*//p' | tr -d '\r' | head -1)
+SID=$(printf '%s' "$LOC" | sed -n 's/.*[?&]sessionId=\([^&]*\).*/\1/p')
+
+if [ -z "$SID" ]; then
+	echo "拿不到 sessionId —— 入口可能已失效。"
+	echo "可以先点「强制重新认证」刷新入口，再回来下线。"
+	exit 1
+fi
+
+echo "sessionId=$SID"
+
+# ---- 2) 通知门户下线 ----
+OUT=$(uclient-fetch -O - --timeout=10 \
+	--header="Content-Type: application/json" \
+	--post-data="{\"sessionId\":\"$SID\"}" \
+	"http://$HOST/eportal/network/offline" 2>&1)
+printf '%s\n' "$OUT" | tail -6
+
+# ---- 3) 清掉 CAS 单点登录票据（否则下次取登录页可能 401）----
+uclient-fetch -O /dev/null --timeout=10 \
+	"http://$HOST/cas-sso/logout?service=http%3A%2F%2F$HOST%2Fportal%2Fpc%2FofflineSuccess" \
+	>/dev/null 2>&1
+
+echo
+echo "已发送下线请求。"
+echo "AC 会在几秒内重新把本机当未认证设备，届时守护进程会自己抓到新入口并重新认证。"

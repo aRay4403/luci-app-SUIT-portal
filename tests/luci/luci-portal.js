@@ -103,9 +103,14 @@ module.exports = async ({ page, ok, shot, wait }) => {
 	ok(serviceOpts.indexOf(service) >= 0,
 		'运营商当前值在下拉选项内（实际: ' + service + '）');
 	ok(host === '10.10.16.56', '认证服务器回显正确（实际: ' + host + '）');
-	ok(ivOn === '30', '在线检测间隔 = 30（实际: ' + ivOn + '）');
-	ok(ivOff === '5', '掉线重试间隔 = 5（实际: ' + ivOff + '）');
-	ok(ivMax === '60', '连续失败退避上限 = 60（实际: ' + ivMax + '）');
+	/*
+	 * 三个间隔只断言「是合法秒数」，不写死具体值 ——
+	 * 它们是用户可调的（本项目实机就改过 30 -> 5），写死会让回归随配置漂移而假失败。
+	 */
+	const isSecs = v => /^\d+$/.test(String(v)) && +v >= 1 && +v <= 3600;
+	ok(isSecs(ivOn), '在线检测间隔是合法秒数（实际: ' + ivOn + '）');
+	ok(isSecs(ivOff), '掉线重试间隔是合法秒数（实际: ' + ivOff + '）');
+	ok(isSecs(ivMax), '连续失败退避上限是合法秒数（实际: ' + ivMax + '）');
 	ok(enabledOn === true, '「启用自动认证」开关为开');
 
 	/*
@@ -169,6 +174,7 @@ module.exports = async ({ page, ok, shot, wait }) => {
 	const btns = await page.$$eval('button', els => els.map(b => b.textContent.trim()));
 	ok(btns.indexOf('立即认证') >= 0, '存在「立即认证」按钮');
 	ok(btns.indexOf('强制重新认证') >= 0, '存在「强制重新认证」按钮（跳过在线检查的逃生口）');
+	ok(btns.indexOf('主动下线') >= 0, '存在「主动下线」按钮（入口过期卡死时的解药）');
 	ok(btns.indexOf('查看日志') >= 0, '存在「查看日志」按钮');
 	ok(btns.indexOf('重启服务') >= 0, '存在「重启服务」按钮');
 	ok(btns.indexOf('恢复无线') >= 0, '存在「恢复无线」按钮（断网暂停无线的逃生口）');

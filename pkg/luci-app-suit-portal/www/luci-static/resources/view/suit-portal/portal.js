@@ -12,7 +12,7 @@
  * 页面分三块：
  *   1) 运行状态（从 /var/run/suit-portal.state 读当前轮询间隔，1 秒轮询刷新）
  *   2) 认证设置表单（UCI: suit-portal.main.*）
- *   3) 操作按钮：立即认证 / 强制重新认证 / 查看日志 / 重启服务
+ *   3) 操作按钮：立即认证 / 强制重新认证 / 主动下线 / 查看日志 / 重启服务
  *      · 立即认证     = 先查在线，已在线就不重复认证（和守护进程同一套判断）
  *      · 强制重新认证 = 跳过在线检查，直接跑完整流程（在线判定误报时的逃生口）
  */
@@ -143,6 +143,34 @@ return view.extend({
 			_('跳过在线检查，强制执行完整认证流程（约 10 秒）'));
 	},
 
+	/*
+	 * 「主动下线」—— 排障用，解决「入口过期 → 永远 ACK_AUTH_REFUSE」的死锁。
+	 *
+	 * 【什么时候会卡死】
+	 *   AC 一旦认为本机已认证，就**不再劫持**外网 HTTP（直接 DROP TCP）。
+	 *   脚本探测拿不到入口，只能复用 UCI 里缓存的旧入口；而旧入口里的
+	 *   wlanuserip / mac 是加密写死的旧值 —— WAN 换 IP 之后，服务端按旧 IP
+	 *   建会话，AC 那边没这台终端，必然回 ACK_AUTH_REFUSE。
+	 *   于是守护进程每 5 秒重试一次、每次都被拒，看着像「永远认证失败」。
+	 *
+	 * 【为什么下线能解】
+	 *   主动下线（POST /eportal/network/offline）让 AC 重新把本机当未认证设备，
+	 *   恢复劫持。下一轮探测就能抓到**当前 IP** 的新入口，认证自动恢复。
+	 *   实测：下线后 8 秒内守护进程即捕获到新入口并认证成功。
+	 *
+	 * 走独立的 /usr/bin/suit-portal-offline，不改动认证脚本本身。
+	 */
+	handleLogout: function() {
+		return fs.exec_direct('/usr/bin/suit-portal-offline', [])
+			.then(function(out) {
+				showOutput(_('主动下线'), out);
+			})
+			.catch(function(e) {
+				ui.addNotification(null,
+					E('p', _('下线失败：%s').format(e && e.message || e)), 'error');
+			});
+	},
+
 	handleLog: function() {
 		return readText(LOGFILE).then(function(s) {
 			var lines = s.split('\n');
@@ -223,6 +251,16 @@ return view.extend({
 					'class': 'btn cbi-button',
 					'click': ui.createHandlerFn(self, 'handleAuthForce')
 				}, _('强制重新认证')),
+				' ',
+				/*
+				 * 「主动下线」：入口过期卡死时的解药（详见 handleLogout 注释）。
+				 * 用 cbi-button-reset 的灰样式 —— 它不是日常操作，
+				 * 但也不像「恢复无线」那样是最后逃生口。
+				 */
+				E('button', {
+					'class': 'btn cbi-button cbi-button-reset',
+					'click': ui.createHandlerFn(self, 'handleLogout')
+				}, _('主动下线')),
 				' ',
 				E('button', {
 					'class': 'btn cbi-button',

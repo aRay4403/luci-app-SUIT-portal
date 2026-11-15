@@ -17,6 +17,7 @@
 			"uci": [ "suit-portal" ],
 			"file": {
 				"/usr/bin/suit-portal.sh": [ "exec" ],
+				"/usr/bin/suit-portal-offline": [ "exec" ],
 				"/etc/init.d/suit-portal": [ "exec" ]
 			}
 		}

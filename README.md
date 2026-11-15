@@ -82,18 +82,20 @@ LuCI 入口：**服务 → SUIT 校园网自动认证**。
 /usr/bin/suit-portal.sh --force-auth     # 真·强制：不查在线，直接跑完整流程
 /usr/bin/suit-portal.sh --probe          # 排障：打印探测地址的原始响应
 /usr/bin/suit-portal.sh --trace          # 排障：逐阶段打印原始 body / 响应头
+/usr/bin/suit-portal-offline             # 主动下线（入口过期卡死时的解药）
 /etc/init.d/suit-portal status|restart|start|stop
 tail -f /var/log/suit-portal.log
 ```
 
 不带参数时就是守护进程那条路径：先 `check_online`，在线就 `已在线，无需认证。` 直接退出。
 
-### 界面上两个认证按钮的区别
+### 界面上的操作按钮
 
 | 按钮 | 走的参数 | 行为 |
 |---|---|---|
 | **立即认证** | `--auth` | 先查在线。**已在线就跳过**，只回一句「已在线，无需重复认证」 |
 | **强制重新认证** | `--force-verbose` | **不查在线**，直接跑完整认证流程 |
+| **主动下线** | `/usr/bin/suit-portal-offline` | 通知门户把本机踢下线，逼 AC 重新劫持 |
 
 为什么「立即认证」在线时要跳过：已经在线再跑一遍完整流程是白跑 ——
 要建会话、取登录页、AES 加密、走 5 步工作流（十几秒），
@@ -102,6 +104,19 @@ tail -f /var/log/suit-portal.log
 那为什么还留「强制重新认证」：因为**在线判定本身可能误报**。
 真遇到「判定说在线、但实际有毛病」，得有个跳过检查、直接重跑的逃生口 ——
 否则点了按钮什么都不发生，人就卡住了。
+
+### 为什么要一个「主动下线」按钮
+
+AC 一旦认为本机已认证，就**不再劫持**外网 HTTP（直接 DROP TCP）。此时脚本探测
+拿不到入口，只能复用 UCI 里缓存的旧入口 —— 而旧入口里的 `wlanuserip` / `mac`
+是**加密写死**的旧值，WAN 换 IP 之后服务端按旧 IP 建会话，AC 那边根本没这台终端，
+必然回 `ACK_AUTH_REFUSE`。于是守护进程每 5 秒重试、每次都被拒，看着像「永远认证失败」。
+
+主动下线（`POST /eportal/network/offline`）会让 AC 重新把本机当未认证设备、恢复劫持 ——
+下一轮探测就能抓到**当前 IP** 的新入口，认证自动恢复。实测下线后 8 秒内即重新认证成功。
+
+> 这个问题有欺骗性：日志里明明写着「入口已过期」，却怎么等都不会自己好 ——
+> 因为 AC 不劫持，脚本就永远拿不到新入口。
 
 ## 五、断网暂停无线
 
@@ -181,7 +196,8 @@ suit-portal/
 │   │   ├── etc/config/suit-portal          UCI 默认配置
 │   │   ├── etc/init.d/suit-portal          procd 服务（自适应间隔 + 退避）
 │   │   ├── etc/uci-defaults/99-suit-portal 首次安装：迁移旧配置 + 启用
-│   │   └── usr/bin/suit-portal.sh          认证主脚本（UCI + 旧 conf 双支持）
+│   │   ├── usr/bin/suit-portal.sh          认证主脚本（UCI + 旧 conf 双支持）
+│   │   └── usr/bin/suit-portal-offline     主动下线（供 LuCI 按钮调用）
 │   └── luci-app-suit-portal/
 │       ├── usr/share/luci/menu.d/           菜单注册
 │       ├── usr/share/rpcd/acl.d/            权限（含 exec，供「立即认证」用）
