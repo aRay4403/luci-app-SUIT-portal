@@ -883,9 +883,10 @@ check_online() {
 # 服务端在线判定：/eportal/network/userOnline
 #
 # 【定位变更 2026-10-04】不再作为主判据（见 check_online 的说明），
-#   只在 --check 里作为「补充说明」使用。并且加了**入口新鲜度校验**：
-#   入口 URL 换出来的会话 userIp 若与当前 WAN IP 不符，说明入口已过期，
-#   此时必须返回 2（无法判定），绝不能返回 1（未认证）—— 那正是旧版的病根。
+#   只在 --check 里作为「补充说明」使用。并且加了**入口一致性校验**：
+#   入口 URL 换出来的会话 userIp 若与当前 WAN IP 不符，只能返回 2（无法判定），
+#   绝不能返回 1（未认证）—— 那正是旧版的病根。
+#   ⚠ 不一致 ≠ 旧入口：本机在 NAT 后面时两边本来就不等（2026-11-15 修正措辞）。
 #
 # 返回: 0=已认证  1=未认证  2=无法判定
 #------------------------------------------------------------------------------
@@ -907,10 +908,15 @@ portal_user_online() {
     fi
     [ -z "$_co_sid" ] && return 2
 
-    # 入口新鲜度：会话里的 userIp 必须等于当前 WAN IP，否则入口已过期
+    # 入口一致性：会话里的 userIp 与当前 WAN IP 不符时，只能判「无法判定」。
+    # 【2026-11-15】措辞改成中性 —— 不一致**不等于是旧入口**：
+    #   本机在 NAT 后面（双 NAT / 上级再套一层）时，两边本来就不会相等。
+    #   这里保守返回 2（无法判定）是安全的：绝不能因为不一致就返回 1（未认证），
+    #   那会让守护进程在明明在线时反复重认证。
     _co_wan=$(wan_ip)
     if [ -n "$_co_wan" ] && [ -n "$_co_ip" ] && [ "$_co_wan" != "$_co_ip" ]; then
-        log "      [userOnline] 入口已过期：会话 userIp=$_co_ip，当前 WAN=$_co_wan"
+        log "      [userOnline] 入口与当前 WAN IP 不一致：会话 userIp=$_co_ip，当前 WAN=$_co_wan"
+        log "        （可能是旧入口，也可能只是本机在 NAT 后面 —— 按「无法判定」处理）"
         return 2
     fi
 
@@ -1233,18 +1239,30 @@ auth_probe_entry() {
     log "      sessionId=$_sid"
     log "      userIp=$_userip userMac=$_usermac nasIp=$_nasip customPageId=$_pageid"
 
-    # ===== 入口新鲜度校验（2026-10-04 新增）=====
-    #   入口 URL 里的 wlanuserip 是加密写死的；WAN 地址一变（DHCP 换网段很正常），
-    #   服务端就按**旧 IP** 建会话，AC 那边根本没这个终端 -> ACK_AUTH_REFUSE。
-    #   这里把「会话里的 userIp」与「当前 WAN IP」对比，不一致就明确告警，
-    #   免得再把「入口过期」误当成「密码错 / 网络断」查半天。
-    _cur_wan=$(wan_ip)
-    if [ -n "$_cur_wan" ] && [ -n "$_userip" ] && [ "$_cur_wan" != "$_userip" ]; then
-        log "      ⚠ 入口已过期：会话 userIp=$_userip，当前 WAN IP=$_cur_wan"
-        log "        该入口是旧 IP 的产物，AC 极可能回 ACK_AUTH_REFUSE。"
-        log "        需等 AC 重新劫持（或重启 WAN 口），本脚本会自动捕获并回写新入口。"
-    elif [ "${_entry_fresh:-0}" = "1" ]; then
+    # ===== 入口新鲜度判定（2026-11-15 修正：按「来源」判，不按 IP 比）=====
+    #
+    # 【为什么不再拿 IP 比】Windows 版踩过这个坑（2026-11-15 实机日志）：
+    #   本机在 NAT 后面时，本机 IP（192.168.x.x）和门户看到的 IP（10.x.x.x）
+    #   本来就不相等；按它判「过期」会导致**每次认证前都先把自己踢下线**，
+    #   于是「认证成功 -> 3 分钟后又掉线 -> 再踢一次」循环，又慢又反复断网。
+    #
+    #   路由器上两者通常同侧（WAN IP 就是门户看到的 IP），所以没暴露出这个症状；
+    #   但这个判据本身不可靠 —— 双 NAT、上级再套一层 NAT、WAN 有多个地址时都会误判。
+    #
+    # 【正确判据】看入口**从哪来**：
+    #     · 刚从网关劫持探测到的 -> 一定带当前 IP，直接回写 UCI；
+    #     · 从 AC 自己的门户页拿到的 -> 同理（见 /usr/bin/suit-portal-freshen）；
+    #     · 只有「缓存兜底」进来的才可能过期，交给服务端的 ACK_AUTH_REFUSE 去证伪。
+    if [ "${_entry_fresh:-0}" = "1" ]; then
         save_entry_url "$_eportal_url"
+    else
+        # 缓存入口：只提示，不据此判定、更不因此丢掉刚拿到的入口
+        _cur_wan=$(wan_ip)
+        if [ -n "$_cur_wan" ] && [ -n "$_userip" ] && [ "$_cur_wan" != "$_userip" ]; then
+            log "      用的是缓存入口：会话 userIp=$_userip，当前 WAN IP=$_cur_wan"
+            log "        （两者不同也可能只是本机在 NAT 后面，不能据此判定过期；"
+            log "          真过期会回 ACK_AUTH_REFUSE，届时主动下线重试即可）"
+        fi
     fi
 
 }
