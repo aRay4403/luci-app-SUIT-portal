@@ -254,8 +254,8 @@ return view.extend({
 				' ',
 				/*
 				 * 「主动下线」：入口过期卡死时的解药（详见 handleLogout 注释）。
-				 * 用 cbi-button-reset 的灰样式 —— 它不是日常操作，
-				 * 但也不像「恢复无线」那样是最后逃生口。
+				 * 用 cbi-button-reset（Argon 下渲染为红色）—— 它会真的把本机断开，
+				 * 红色正好提示「这不是日常操作」。
 				 */
 				E('button', {
 					'class': 'btn cbi-button cbi-button-reset',
