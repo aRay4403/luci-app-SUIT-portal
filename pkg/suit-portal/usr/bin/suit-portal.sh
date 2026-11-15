@@ -14,6 +14,8 @@
 #                                           在线则跳过并说明，离线才走完整流程
 #   /usr/bin/suit-portal.sh --force-auth    真·强制：不查在线，直接跑完整认证
 #                                           （对应 LuCI「强制重新认证」按钮）
+#                                           探测不到入口时会**主动下线再重连**
+#                                           （跳过 180 秒冷却，见 offline_now）
 #   /usr/bin/suit-portal.sh --probe         排障：打印探测地址的原始响应
 #   /usr/bin/suit-portal.sh --trace         排障：逐阶段打印原始 body / 响应头
 #   /usr/bin/suit-portal.sh --wifi-resume   逃生口：立即恢复全部无线（无视开关与状态）
@@ -1141,25 +1143,48 @@ auth_session_init() {
 
 }
 
-auth_probe_entry() {
-    # ===== Step 0b: 触发网关拦截, 捕获 eportal 入口参数 =====
-    #
-    # 【机制说明 · 实测自 HAR】
-    #   本网关不是标准 HTTP 302 重定向, 而是在响应体里注入一段 JS:
-    #     <script>top.self.location.href='http://10.10.16.56/eportal/index.jsp?wlanuserip=...&mac=...'</script>
-    #   该 body 约 478~494 字节, HTTP 状态是 200。
-    #   所以：不能靠 Location 响应头, 必须从 body 里正则提取 location.href 的 URL。
-    #
-    #   拿到 eportal/index.jsp?<加密参数> 后, 再请求它, 它会 302 到:
-    #     /portal/portal-main?sessionId=xxx&userIp=...&userMac=...&nasIp=...&customPageId=...
-    #   这些是明文, 直接解析即可。
-    log "[0/5] 触发网关拦截..."
-    _eportal_url=""
+#------------------------------------------------------------------------------
+# 主动下线（内部用）——解开「AC 认为本机已认证 → 不再劫持 → 拿不到入口」的死锁
+#
+# 【为什么需要】AC 只要认为本机已认证，就直接 DROP 外网 TCP、不再下发入口。
+#   此时探测永远拿不到入口，只能复用旧入口；旧入口里的 wlanuserip 是加密写死的
+#   旧 IP，服务端按它建会话、AC 那边没这台终端 → ACK_AUTH_REFUSE。
+#   主动下线能让 AC 重新把本机当未认证设备，恢复劫持。
+#
+# 【冷却】默认 180 秒，和 /usr/bin/suit-portal-freshen 共用同一个时间戳文件，
+#   免得守护进程和定时自愈各踢一次。手动「强制重新认证」用 FORCE_OFFLINE=1 跳过。
+#------------------------------------------------------------------------------
+OFFLINE_STAMP=${OFFLINE_STAMP:-/tmp/run/suit-portal.offline.last}
+OFFLINE_COOLDOWN=${OFFLINE_COOLDOWN:-180}
 
-    # 【2026-10-04 顺序反转】原来「固定入口优先、跳过探测」，这是病根之一：
-    #   固定入口里 wlanuserip 是**加密写死的旧 IP**，WAN 地址一变就失效。
-    #   现在改成「**先探测**」—— 只要 AC 还在劫持，拿到的入口一定带**当前** IP，
-    #   天然不会过期。探测拿不到才退回固定入口（下面会做新鲜度校验）。
+offline_cooldown_left() {
+    mkdir -p /tmp/run 2>/dev/null
+    [ -f "$OFFLINE_STAMP" ] || { printf '0'; return 0; }
+    _ocl_last=$(cat "$OFFLINE_STAMP" 2>/dev/null)
+    case "$_ocl_last" in ''|*[!0-9]*) _ocl_last=0 ;; esac
+    _ocl_left=$(( OFFLINE_COOLDOWN - ( $(date +%s) - _ocl_last ) ))
+    [ "$_ocl_left" -lt 0 ] && _ocl_left=0
+    printf '%s' "$_ocl_left"
+}
+
+offline_now() {
+    mkdir -p /tmp/run 2>/dev/null
+    if [ ! -x /usr/bin/suit-portal-offline ]; then
+        log "      主动下线：找不到 /usr/bin/suit-portal-offline（应随包安装）"
+        return 1
+    fi
+    _on_out=$(/usr/bin/suit-portal-offline 2>&1)
+    case "$_on_out" in
+        *"已发送下线请求"*)
+            date +%s >"$OFFLINE_STAMP"
+            return 0 ;;
+    esac
+    log "      主动下线未成功：$(printf '%s' "$_on_out" | tail -1)"
+    return 1
+}
+
+# 跑一轮网关劫持探测；命中则把入口写进 _eportal_url 并置 _entry_fresh=1
+probe_once() {
     for _probe in $PROBE_URLS; do
         http_get "$_probe" >/dev/null 2>&1
 
@@ -1185,24 +1210,69 @@ auth_probe_entry() {
                 _eportal_url=$(abs_url "$_hit")
                 _entry_fresh=1
                 log "      探测 $_probe -> 捕获入口（含当前 IP）"
-                break ;;
+                return 0 ;;
         esac
     done
+    return 1
+}
+
+auth_probe_entry() {
+    # ===== Step 0b: 触发网关拦截, 捕获 eportal 入口参数 =====
+    #
+    # 【机制说明 · 实测自 HAR】
+    #   本网关不是标准 HTTP 302 重定向, 而是在响应体里注入一段 JS:
+    #     <script>top.self.location.href='http://10.10.16.56/eportal/index.jsp?wlanuserip=...&mac=...'</script>
+    #   该 body 约 478~494 字节, HTTP 状态是 200。
+    #   所以：不能靠 Location 响应头, 必须从 body 里正则提取 location.href 的 URL。
+    #
+    #   拿到 eportal/index.jsp?<加密参数> 后, 再请求它, 它会 302 到:
+    #     /portal/portal-main?sessionId=xxx&userIp=...&userMac=...&nasIp=...&customPageId=...
+    #   这些是明文, 直接解析即可。
+    log "[0/5] 触发网关拦截..."
+    _eportal_url=""
+
+    # 【2026-10-04 顺序反转】原来「固定入口优先、跳过探测」，这是病根之一：
+    #   固定入口里 wlanuserip 是**加密写死的旧 IP**，WAN 地址一变就失效。
+    #   现在改成「**先探测**」—— 只要 AC 还在劫持，拿到的入口一定带**当前** IP，
+    #   天然不会过期。探测拿不到才退回固定入口（下面会做新鲜度校验）。
+    # 一轮探测：命中则 _eportal_url 已填好、_entry_fresh=1
+    probe_once || true
 
     if [ -z "$_eportal_url" ]; then
-        # 【兜底】AC 只在「未认证设备首次访问外网」时劫持；一旦它认为设备已认证
-        #   （哪怕只是半认证）就直接 DROP TCP，不再劫持，此时探测永远拿不到入口
-        #   （实机现象：SYN_SENT 无响应）。这时只能复用历史上抓到的那条。
-        #   ⚠ 但它是**旧 IP**，AC 大概率回 ACK_AUTH_REFUSE，下面会明确告警。
-        if [ -n "$PORTAL_ENTRY_URL" ]; then
-            log "      探测未劫持，改用配置的固定入口 URL 兜底"
+        # 【2026-11-15 新增】探测不到 = AC 停止劫持（几乎总是「AC 认为本机已认证」），
+        #   这正是 ACK_AUTH_REFUSE 死锁的起点。以前这里直接退回固定入口，
+        #   等于拿旧 IP 去认证、必然被拒，守护进程还每 5 秒重试一次，永远好不了。
+        #
+        #   现在：先主动下线一次（让 AC 重新把本机当未认证设备），再重抓入口。
+        #   · 冷却 180 秒，和 /usr/bin/suit-portal-freshen 共用时间戳，避免重复踢；
+        #   · 手动「强制重新认证」置 FORCE_OFFLINE=1，跳过冷却（用户已明确要求强制）。
+        log "      探测不到网关跳转（AC 未劫持）"
+        _cd_left=$(offline_cooldown_left)
+        if [ "$_cd_left" -gt 0 ] && [ "${FORCE_OFFLINE:-0}" != "1" ]; then
+            log "      → 主动下线冷却中（还剩 ${_cd_left} 秒，${OFFLINE_COOLDOWN} 秒一次），先不重复踢"
+        elif offline_now; then
+            log "      → 已主动下线，等 AC 重新下发入口（最多 12 秒）..."
+            _pw=0
+            while [ "$_pw" -lt 6 ]; do
+                sleep 2
+                _pw=$(( _pw + 1 ))
+                probe_once && break
+            done
+            [ -n "$_eportal_url" ] && log "      → 下线后重新捕获到入口"
+        fi
+
+        # 还是拿不到，才退回配置里的固定入口（多半是旧 IP，AC 大概率回 ACK_AUTH_REFUSE）
+        if [ -z "$_eportal_url" ] && [ -n "$PORTAL_ENTRY_URL" ]; then
+            log "      改用配置的固定入口 URL 兜底（可能是旧 IP）"
             _eportal_url="$PORTAL_ENTRY_URL"
             _entry_fresh=0
-        else
-            die "未捕获网关跳转，且未配置 PORTAL_ENTRY_URL 兜底。
-       说明：AC 当前不劫持（可能认为本机已认证），且没有可复用的入口 URL。
-       获取方式：在能正常上网时执行一次本脚本，或从日志里找 '入口: http://...eportal/index.jsp?...'，
-       把它配置到 /etc/portal-auth.conf 的 PORTAL_ENTRY_URL。"
+        fi
+
+        if [ -z "$_eportal_url" ]; then
+            die "未捕获网关跳转，且没有可兜底的入口 URL。
+       说明：AC 当前不劫持（多半认为本机已认证），主动下线后也没能重新拿到入口 ——
+       可能 AC 还没重新登记这台设备。
+       办法：断开再重连一次校园网（让 AC 重新劫持），然后点「立即认证」。"
         fi
     fi
     log "      入口: $(printf '%s' "$_eportal_url" | cut -c1-100)..."
@@ -1843,12 +1913,17 @@ main() {
             exit $?
             ;;
         --force|--force-auth)
-            # 真·强制：不查在线，直接跑完整认证流程
+            # 真·强制：不查在线，直接跑完整认证流程。
+            # FORCE_OFFLINE=1：跳过主动下线的 180 秒冷却 —— 用户已经明确要求强制，
+            # 卡在「AC 不劫持」时就该立刻下线重来，而不是让他等 3 分钟。
+            FORCE_OFFLINE=1
             auth_run_and_resume
             exit $?
             ;;
         --verbose|--force-verbose)
+            # LuCI「强制重新认证」按钮走这条
             VERBOSE=1
+            FORCE_OFFLINE=1
             auth_run_and_resume
             exit $?
             ;;
