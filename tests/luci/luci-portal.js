@@ -111,7 +111,12 @@ module.exports = async ({ page, ok, shot, wait }) => {
 	ok(isSecs(ivOn), '在线检测间隔是合法秒数（实际: ' + ivOn + '）');
 	ok(isSecs(ivOff), '掉线重试间隔是合法秒数（实际: ' + ivOff + '）');
 	ok(isSecs(ivMax), '连续失败退避上限是合法秒数（实际: ' + ivMax + '）');
-	ok(enabledOn === true, '「启用自动认证」开关为开');
+	/*
+	 * 只断言开关正常渲染成布尔值，不写死「必须是开」——
+	 * 用户可能故意关掉（例如改用别的客户端认证），写死会随配置漂移假失败。
+	 */
+	ok(typeof enabledOn === 'boolean',
+		'「启用自动认证」开关正常渲染（当前: ' + (enabledOn ? '开' : '关') + '）');
 
 	/*
 	 * 「门户入口 URL」是**灰掉的只读框**：保留输入框，但 disabled ——

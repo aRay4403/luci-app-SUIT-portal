@@ -12,7 +12,7 @@
  * 页面分三块：
  *   1) 运行状态（从 /var/run/suit-portal.state 读当前轮询间隔，1 秒轮询刷新）
  *   2) 认证设置表单（UCI: suit-portal.main.*）
- *   3) 操作按钮：立即认证 / 强制重新认证 / 主动下线 / 查看日志 / 重启服务
+ *   3) 操作按钮：立即认证 / 主动下线 / 强制重新认证 / 查看日志 / 重启服务
  *      · 立即认证     = 先查在线，已在线就不重复认证（和守护进程同一套判断）
  *      · 强制重新认证 = 跳过在线检查，直接跑完整流程（在线判定误报时的逃生口）
  */
@@ -247,13 +247,10 @@ return view.extend({
 					'click': ui.createHandlerFn(self, 'handleAuthNow')
 				}, _('立即认证')),
 				' ',
-				E('button', {
-					'class': 'btn cbi-button',
-					'click': ui.createHandlerFn(self, 'handleAuthForce')
-				}, _('强制重新认证')),
-				' ',
 				/*
 				 * 「主动下线」：入口过期卡死时的解药（详见 handleLogout 注释）。
+				 * 位置在「立即认证」和「强制重新认证」之间：先用它把本机踢下线、
+				 * 让 AC 恢复劫持，不行再上「强制」整条重跑。
 				 * 用 cbi-button-reset（Argon 下渲染为红色）—— 它会真的把本机断开，
 				 * 红色正好提示「这不是日常操作」。
 				 */
@@ -261,6 +258,11 @@ return view.extend({
 					'class': 'btn cbi-button cbi-button-reset',
 					'click': ui.createHandlerFn(self, 'handleLogout')
 				}, _('主动下线')),
+				' ',
+				E('button', {
+					'class': 'btn cbi-button',
+					'click': ui.createHandlerFn(self, 'handleAuthForce')
+				}, _('强制重新认证')),
 				' ',
 				E('button', {
 					'class': 'btn cbi-button',

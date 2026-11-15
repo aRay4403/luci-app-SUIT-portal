@@ -32,24 +32,34 @@ fi
 
 # ---- 1) 用当前入口换一个 sessionId ----
 # busybox nc 不支持任何选项，且 stdin 一 EOF 就立刻断开，必须 sleep 按住。
+#
+# 【为什么要重试】实测（2026-11-15 22:47）紧跟在认证流程的探测之后请求入口，
+#   偶发拿不到响应（连接被断），一次就放弃会把「能下线」误报成「入口失效」。
+#   这里最多试 3 次，每次隔 1 秒。
 PATH_PART=${ENTRY#http://$HOST}
-RAW=$(
-	{
-		printf 'GET %s HTTP/1.0\r\n' "$PATH_PART"
-		printf 'Host: %s\r\n' "$HOST"
-		printf 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36\r\n'
-		printf 'Accept: */*\r\n'
-		printf 'Connection: close\r\n\r\n'
-		sleep 3
-	} | nc "$HOST" 80
-)
-
-LOC=$(printf '%s' "$RAW" | sed -n 's/^[Ll]ocation:[[:space:]]*//p' | tr -d '\r' | head -1)
-SID=$(printf '%s' "$LOC" | sed -n 's/.*[?&]sessionId=\([^&]*\).*/\1/p')
+SID=""
+_n=0
+while [ "$_n" -lt 3 ]; do
+	RAW=$(
+		{
+			printf 'GET %s HTTP/1.0\r\n' "$PATH_PART"
+			printf 'Host: %s\r\n' "$HOST"
+			printf 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36\r\n'
+			printf 'Accept: */*\r\n'
+			printf 'Connection: close\r\n\r\n'
+			sleep 3
+		} | nc "$HOST" 80
+	)
+	LOC=$(printf '%s' "$RAW" | sed -n 's/^[Ll]ocation:[[:space:]]*//p' | tr -d '\r' | head -1)
+	SID=$(printf '%s' "$LOC" | sed -n 's/.*[?&]sessionId=\([^&]*\).*/\1/p')
+	[ -n "$SID" ] && break
+	_n=$(( _n + 1 ))
+	[ "$_n" -lt 3 ] && sleep 1
+done
 
 if [ -z "$SID" ]; then
-	echo "拿不到 sessionId —— 入口可能已失效。"
-	echo "可以先点「强制重新认证」刷新入口，再回来下线。"
+	echo "拿不到 sessionId —— 入口暂时换不出会话（可能刚被认证流程占用）。"
+	echo "重试一次通常就好；仍然不行的话，先「强制重新认证」刷新入口，再回来下线。"
 	exit 1
 fi
 
